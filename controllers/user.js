@@ -3,10 +3,13 @@ const { Users, Credentials, Psychologist } = db;
 const nodemailer = require("nodemailer");
 const crypto = require("crypto");
 const multer = require("multer");
-const { createClient } = require("@supabase/supabase-js");
+const {
+    deleteObject,
+    deleteProfileImageByUrl,
+    uploadProfileImage,
+} = require("../services/r2");
 require("dotenv").config();
 
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
 const transporter = nodemailer.createTransport({
     service: 'gmail',
     auth: {
@@ -14,6 +17,17 @@ const transporter = nodemailer.createTransport({
         pass: process.env.EMAIL_PASSWORD,
     },
 });
+
+function toSafeUser(user) {
+    return {
+        user_id: user.user_id,
+        email: user.email,
+        name: user.name,
+        birthday: user.birthday,
+        profile_photo_url: user.profile_photo_url,
+        role: user.credentials?.role,
+    };
+}
 
 async function sendVerificationEmailUpdate(email, token) {
     const verificationLink = `${process.env.FRONTEND_URL}/verify-email/${token}`;
@@ -73,6 +87,8 @@ exports.updateUser = async (req, res) => {
     const user_id = req.user_id;
     const { email, name, birthday } = req.body;
     const updateData = {};
+    let uploadedProfile;
+    let previousProfileUrl;
     let t;
 
     try {
@@ -102,29 +118,51 @@ exports.updateUser = async (req, res) => {
         }
 
         if (req.file) {
-            const fileExt = req.file.originalname.split('.').pop();
-            const fileName = `${user_id}-${Date.now()}.${fileExt}`;
-            const { data, error } = await supabase.storage.from('users-profile').upload(`profile-pictures/${fileName}`, req.file.buffer, {
-                contentType: req.file.mimetype
+            previousProfileUrl = user.profile_photo_url;
+            uploadedProfile = await uploadProfileImage({
+                userId: user_id,
+                buffer: req.file.buffer,
+                contentType: req.file.mimetype,
             });
-
-            if (error) throw error;
-            updateData.profile_photo_url = `${process.env.SUPABASE_URL}/storage/v1/object/public/users-profile/profile-pictures/${fileName}`;
+            updateData.profile_photo_url = uploadedProfile.url;
         }
 
         if (name && name !== user.name) updateData.name = name;
         if (birthday && birthday !== user.birthday) updateData.birthday = birthday;
         if (Object.keys(updateData).length === 0) {
             await t.rollback();
-            return res.status(200).json({ error: false, message: 'No changes to update', user });
+            return res.status(200).json({
+                error: false,
+                message: 'No changes to update',
+                user: toSafeUser(user),
+            });
         }
 
         const updatedUser = await user.update(updateData, { transaction: t });
         await t.commit();
 
-        res.status(200).json({ error: false, message: 'User updated successfully', user: updatedUser });
+        if (uploadedProfile && previousProfileUrl) {
+            try {
+                await deleteProfileImageByUrl(previousProfileUrl);
+            } catch (cleanupError) {
+                console.warn("Unable to remove the previous R2 profile image:", cleanupError.message);
+            }
+        }
+
+        res.status(200).json({
+            error: false,
+            message: 'User updated successfully',
+            user: toSafeUser(updatedUser),
+        });
     } catch (error) {
-        if (t) await t.rollback();
+        if (t && !t.finished) await t.rollback();
+        if (uploadedProfile?.key) {
+            try {
+                await deleteObject(uploadedProfile.key);
+            } catch (cleanupError) {
+                console.warn("Unable to clean up the failed R2 upload:", cleanupError.message);
+            }
+        }
         res.status(400).json({ error: true, message: error.message });
     }
 };

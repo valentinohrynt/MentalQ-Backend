@@ -14,11 +14,6 @@ router.put(
    "/users/update",
    authenticateToken,
    userController.uploadProfileImage,
-   (req, res, next) => {
-      console.log(req.file);
-      console.log(req.body);
-      next();
-   },
    userController.updateUser
 );
 
@@ -30,9 +25,10 @@ router.post("/register", authController.registerUser);
 router.get("/verify-email/:token", authController.verifyEmail);
 router.post("/login", authController.loginUser);
 router.post("/google-login", authController.authFirebase);
+router.post("/firebase-token", authenticateToken, authController.createFirebaseToken);
 
 // User Routes
-router.get("/user/:id", userController.getUserById);
+router.get("/user", authenticateToken, userController.getUserById);
 
 // Password Reset Routes
 router.post("/request-reset", authController.requestPasswordReset);
@@ -48,17 +44,17 @@ router.put("/notes/delete/:id", authenticateToken, noteController.deleteNote);
 
 // Auth Psikologi Routes
 router.post("/register-psikologi", authController.registerPsikologi);
-router.get("/psychologist", userController.getAllPsychologists);
+router.get("/psychologist", authenticateToken, userController.getAllPsychologists);
 
 // Psikologi Notes
-router.get("/psychologist/:id", userController.getPsychologistById);
+router.get("/psychologist/:id", authenticateToken, userController.getPsychologistById);
 
 // Analysis Routes
 router.get("/analysis", authenticateToken, analysisController.getAnalysis);
 
 // Midtrans Routes
-router.post("/transaction", midtransController.createTransaction);
-router.get("/transaction/:id", midtransController.getStatusTransaction);
-router.post("/transaction/:id/cancel", midtransController.cancelTransaction);
+router.post("/transaction", authenticateToken, midtransController.createTransaction);
+router.get("/transaction/:id", authenticateToken, midtransController.getStatusTransaction);
+router.post("/transaction/:id/cancel", authenticateToken, midtransController.cancelTransaction);
 
 module.exports = router;

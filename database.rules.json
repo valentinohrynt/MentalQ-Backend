@@ -1,0 +1,41 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "userChats": {
+      "$userId": {
+        ".read": "auth != null && auth.token.app_user_id === $userId"
+      }
+    },
+    "chatroom": {
+      "$chatId": {
+        ".read": "auth != null && (data.child('members/user/id').val() === auth.token.app_user_id || data.child('members/psychologist/id').val() === auth.token.app_user_id)",
+        "lastMessage": {
+          ".write": "auth != null && root.child('chatroom').child($chatId).child('isEnded').val() !== true && (root.child('chatroom').child($chatId).child('members/user/id').val() === auth.token.app_user_id || root.child('chatroom').child($chatId).child('members/psychologist/id').val() === auth.token.app_user_id)",
+          ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 2000"
+        },
+        "lastMessageSenderId": {
+          ".write": "auth != null && root.child('chatroom').child($chatId).child('isEnded').val() !== true && newData.val() === auth.token.app_user_id && (root.child('chatroom').child($chatId).child('members/user/id').val() === auth.token.app_user_id || root.child('chatroom').child($chatId).child('members/psychologist/id').val() === auth.token.app_user_id)",
+          ".validate": "newData.isString()"
+        },
+        "updatedAt": {
+          ".write": "auth != null && root.child('chatroom').child($chatId).child('isEnded').val() !== true && (root.child('chatroom').child($chatId).child('members/user/id').val() === auth.token.app_user_id || root.child('chatroom').child($chatId).child('members/psychologist/id').val() === auth.token.app_user_id)",
+          ".validate": "newData.isString() && newData.val().matches(/^[0-9]{13}$/)"
+        },
+        "isEnded": {
+          ".write": "auth != null && auth.token.role === 'psychologist' && root.child('chatroom').child($chatId).child('members/psychologist/id').val() === auth.token.app_user_id && data.val() === false && newData.val() === true",
+          ".validate": "newData.isBoolean()"
+        }
+      }
+    },
+    "messages": {
+      "$chatId": {
+        ".read": "auth != null && (root.child('chatroom').child($chatId).child('members/user/id').val() === auth.token.app_user_id || root.child('chatroom').child($chatId).child('members/psychologist/id').val() === auth.token.app_user_id)",
+        "$messageId": {
+          ".write": "auth != null && !data.exists() && root.child('chatroom').child($chatId).child('isEnded').val() !== true && (root.child('chatroom').child($chatId).child('members/user/id').val() === auth.token.app_user_id || root.child('chatroom').child($chatId).child('members/psychologist/id').val() === auth.token.app_user_id) && newData.child('id').val() === $messageId && newData.child('chatRoomId').val() === $chatId && newData.child('senderId').val() === auth.token.app_user_id",
+          ".validate": "newData.hasChildren(['id', 'chatRoomId', 'senderId', 'content', 'createdAt']) && newData.child('content').isString() && newData.child('content').val().length > 0 && newData.child('content').val().length <= 2000 && newData.child('createdAt').isString() && newData.child('createdAt').val().matches(/^[0-9]{13}$/)"
+        }
+      }
+    }
+  }
+}

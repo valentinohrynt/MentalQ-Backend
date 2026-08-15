@@ -29,15 +29,16 @@ module.exports = (sequelize, DataTypes) => {
          },
 
          order_id: {
-            type: DataTypes.INTEGER,
+            type: DataTypes.STRING,
             allowNull: false,
+            unique: true,
          },
 
          psychologist_id: {
             type: DataTypes.INTEGER,
             allowNull: false,
             references: {
-               model: "psychologists",
+               model: "psychologist",
                key: "psychologist_id",
             },
          },

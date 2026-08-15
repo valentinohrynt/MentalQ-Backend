@@ -1,7 +1,8 @@
 const db = require('../models');
 const { Notes, Users, Analysis } = db;
 require('dotenv').config();
-const axios = require('axios');
+const { analyzeWellbeing } = require('../services/gemini');
+const { isAtLeastAge } = require('../utils/age');
 
 exports.createNote = async (req, res) => {
     const { title, content, emotion } = req.body;
@@ -11,7 +12,12 @@ exports.createNote = async (req, res) => {
     try {
         t = await db.sequelize.transaction();
 
-        const user = await Users.findByPk(user_id, { transaction: t });
+        // Serialize note creation per user so concurrent requests cannot bypass
+        // the one-active-note-per-Jakarta-day rule.
+        const user = await Users.findByPk(user_id, {
+            transaction: t,
+            lock: t.LOCK.UPDATE,
+        });
 
         if (!user) {
             await t.rollback();
@@ -64,6 +70,8 @@ exports.createNote = async (req, res) => {
 
         await t.commit();
 
+        await analyzeNote(newNote, user_id);
+
         res.status(201).json({
             error: false,
             message: "Note created successfully",
@@ -77,7 +85,6 @@ exports.createNote = async (req, res) => {
         });
     }
 };
-
 exports.getAllNotes = async (req, res) => {
     const user_id = req.user_id;
     let t;
@@ -181,7 +188,7 @@ exports.getNoteById = async (req, res) => {
 
 exports.updateNote = async (req, res) => {
     const { id } = req.params;
-    const { title, content, emotion, content_normalized} = req.body;
+    const { title, content, emotion } = req.body;
     const user_id = req.user_id;
     let t;
 
@@ -206,21 +213,24 @@ exports.updateNote = async (req, res) => {
         }
 
         const initialContent = note.content;
+        const contentChanged = typeof content === "string" && content !== initialContent;
 
         const updatedNote = await note.update(
             {
-                title: title || note.title,
-                content: content || note.content,
-                emotion: emotion || note.emotion,
-                content_normalized: content_normalized || note.content_normalized,
+                title: title ?? note.title,
+                content: content ?? note.content,
+                emotion: emotion ?? note.emotion,
+                // Normalization is no longer trusted from mobile clients. Clear a stale
+                // normalized value so prediction falls back to the newly saved content.
+                content_normalized: contentChanged ? null : note.content_normalized,
             },
             { transaction: t }
         );
 
         await t.commit();
 
-        if (content != initialContent) {
-            analyzeNotes(user_id);
+        if (contentChanged) {
+            await analyzeNote(updatedNote, user_id);
         }
 
         res.status(200).json({
@@ -284,63 +294,38 @@ exports.deleteNote = async (req, res) => {
     }
 };
 
-const analyzeNotes = async (user_id) => {
+const analyzeNote = async (note, user_id) => {
     try {
-        const dailyNotes = await Notes.findAll({
-            where: {
-                user_id,
-                isActive: true,
-                updatedAt: {
-                    [db.Sequelize.Op.gte]: new Date(new Date().setHours(0, 0, 0, 0)),
-                },
-            },
-            order: [["updatedAt", "DESC"]],
-            limit: 1,
+        const user = await Users.findByPk(user_id, {
+            attributes: ["birthday"],
         });
-
-        if (dailyNotes.length === 0) {
-            console.log("No daily notes found for analysis");
+        if (!user || !isAtLeastAge(user.birthday, 18)) {
             return null;
         }
 
-        const content = dailyNotes
-            .map((note) => note.content_normalized || note.content)
-            .join(" ");
-
-        const aiResponse = await axios.post(
-            process.env.CLOUDRUNAPI + "/predict",
-            { statements: [content] },
-            {
-                headers: { "Content-Type": "application/json" },
-            }
-        );
-
-        const { predicted_status, confidence_scores } = aiResponse.data[0];
-
-        const highest_confidence_score = Math.max(
-            ...Object.values(confidence_scores)
-        );
+        const { predicted_status, confidence_score, model } =
+            await analyzeWellbeing(note.content);
 
         const findNoteById = await Analysis.findOne({
             where: {
-                note_id: dailyNotes[0].note_id,
+                note_id: note.note_id,
             },
         });
 
         if (findNoteById) {
             const updatedAnalysis = await findNoteById.update({
                 predicted_status: predicted_status,
-                confidence_score: highest_confidence_score,
+                confidence_score,
             });
-            console.log("Analysis updated successfully:", updatedAnalysis);
+            console.log(`Journal analysis updated with ${model}`);
             return updatedAnalysis;
         } else {
             const newAnalysis = await Analysis.create({
-                note_id: dailyNotes[0].note_id,
+                note_id: note.note_id,
                 predicted_status: predicted_status,
-                confidence_score: highest_confidence_score,
+                confidence_score,
             });
-            console.log("Analysis completed successfully:", newAnalysis);
+            console.log(`Journal analysis created with ${model}`);
             return newAnalysis;
         }
     } catch (error) {
@@ -349,63 +334,3 @@ const analyzeNotes = async (user_id) => {
         return null;
     }
 };
-
-// exports.analyzeDailyNotes = async (req, res) => {
-//     const user_id = req.user_id;
-
-//     try {
-//         // Fetch user's daily notes
-//         const dailyNotes = await Notes.findAll({
-//             where: {
-//                 user_id,
-//                 isActive: true,
-//                 createdAt: {
-//                     [db.Sequelize.Op.gte]: new Date(new Date().setHours(0, 0, 0, 0)),
-//                 },
-//             },
-//         });
-
-//         if (dailyNotes.length === 0) {
-//             return res.status(404).json({
-//                 error: true,
-//                 message: 'No daily notes found for analysis',
-//             });
-//         }
-
-//         // Prepare the notes content for AI analysis
-//         const content = dailyNotes.map((note) => note.content).join(' ');
-
-//         // Make the AI service call
-//         const aiResponse = await axios.post(
-//             process.env.CLOUDRUNAPI + '/predict',
-//             { content },
-//             {
-//                 headers: { 'Content-Type': 'application/json' },
-//             }
-//         );
-
-//         // Handle AI service response
-//         const { predicted_status } = aiResponse.data;
-
-//         // Save analysis results to the database
-//         const newAnalysis = await Analysis.create({
-//             entry_id: dailyNotes[0].entry_id, // Assuming linking with the first note of the day
-//             predicted_status,
-//             analysis_date: new Date(),
-//         });
-
-//         res.status(200).json({
-//             error: false,
-//             message: 'Analysis completed successfully',
-//             analysis: newAnalysis,
-//         });
-//     } catch (error) {
-//         console.error(error);
-
-//         // Handle errors gracefully
-//         res.status(500).json({
-//             error: true,
-//             message: error.response?.data?.message || error.message,
-//         });
-//     }
-// };

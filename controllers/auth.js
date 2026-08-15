@@ -5,12 +5,44 @@ const crypto = require("crypto");
 const bcrypt = require("bcrypt");
 const validator = require("validator");
 const rateLimit = require("express-rate-limit");
-const admin = require("firebase-admin");
+const { getFirebaseAuth } = require("../services/firebase");
+const { isAtLeastAge, parseBirthday } = require("../utils/age");
 require("dotenv").config();
-const fs = require("fs");
 
 const { Users, Credentials, UserSessions, PasswordResetTokens, Psychologist } =
     db;
+
+function safeUser(user) {
+    return {
+        user_id: user.user_id,
+        email: user.email,
+        name: user.name,
+        birthday: user.birthday,
+        profile_photo_url: user.profile_photo_url,
+        role: user.credentials.role,
+    };
+}
+
+async function createFirebaseSessionToken(user, transaction, preferredUid) {
+    if (!user.credentials) {
+        throw new Error("User credentials could not be loaded");
+    }
+
+    const firebaseUid = user.credentials.firebase_uid
+        || preferredUid
+        || `mentalq-user-${user.user_id}`;
+    if (!user.credentials.firebase_uid) {
+        await user.credentials.update(
+            { firebase_uid: firebaseUid },
+            { transaction }
+        );
+    }
+
+    return getFirebaseAuth().createCustomToken(firebaseUid, {
+        app_user_id: String(user.user_id),
+        role: user.credentials.role,
+    });
+}
 
 const transporter = nodemailer.createTransport({
     service: 'gmail',
@@ -72,13 +104,18 @@ exports.registerUser = async (req, res) => {
             });
         }
 
-        const [day, month, year] = birthday.split("/");
-        const birthdayDate = new Date(`${year}-${month}-${day}`);
+        const birthdayDate = parseBirthday(birthday);
 
-        if (isNaN(birthdayDate.getTime())) {
+        if (!birthdayDate) {
             return res.status(400).json({
                 error: true,
                 message: "Invalid birthday format",
+            });
+        }
+        if (!isAtLeastAge(birthdayDate, 18)) {
+            return res.status(400).json({
+                error: true,
+                message: "You must be at least 18 years old to use MentalQ",
             });
         }
         t = await db.sequelize.transaction();
@@ -166,13 +203,18 @@ exports.registerPsikologi = async (req, res) => {
             });
         }
 
-        const [day, month, year] = birthday.split("/");
-        const birthdayDate = new Date(`${year}-${month}-${day}`);
+        const birthdayDate = parseBirthday(birthday);
 
-        if (isNaN(birthdayDate.getTime())) {
+        if (!birthdayDate) {
             return res.status(400).json({
                 error: true,
                 message: "Invalid birthday format",
+            });
+        }
+        if (!isAtLeastAge(birthdayDate, 18)) {
+            return res.status(400).json({
+                error: true,
+                message: "You must be at least 18 years old to use MentalQ",
             });
         }
 
@@ -340,25 +382,19 @@ exports.loginUser = async (req, res) => {
             { transaction: t }
         );
 
-        await t.commit();
+        const firebaseCustomToken = await createFirebaseSessionToken(user, t);
 
-        const safeUser = {
-            user_id: user.user_id,
-            email: user.email,
-            name: user.name,
-            birthday: user.birthday,
-            profile_photo_url: user.profile_photo_url,
-            role: user.credentials.role
-        };
+        await t.commit();
 
         res.status(200).json({
             error: false,
             message: 'User logged in successfully',
-            user: safeUser,
-            token: token
+            user: safeUser(user),
+            token,
+            firebase_custom_token: firebaseCustomToken,
         });
     } catch (error) {
-        if (t) await t.rollback();
+        if (t && !t.finished) await t.rollback();
         res.status(400).json({
             error: true,
             message: error.message
@@ -366,29 +402,36 @@ exports.loginUser = async (req, res) => {
     }
 };
 
-const firebaseCreds = JSON.parse(process.env.FIREBASE_CREDENTIALS);
-
-admin.initializeApp({
-    credential: admin.credential.cert(firebaseCreds),
-    projectId: firebaseCreds.project_id
-});
-
-
 exports.authFirebase = async (req, res) => {
     const { firebaseToken } = req.body;
+    let t;
 
     try {
-        const decodedToken = await admin.auth().verifyIdToken(firebaseToken, true);
-        const { email, name, picture } = decodedToken;
+        if (!firebaseToken) {
+            return res.status(400).json({
+                error: true,
+                message: 'Firebase token is required',
+            });
+        }
 
+        const firebaseAuth = getFirebaseAuth();
+        const decodedToken = await firebaseAuth.verifyIdToken(firebaseToken, true);
+        const { email, name, picture } = decodedToken;
+        if (!email || decodedToken.email_verified !== true) {
+            return res.status(401).json({
+                error: true,
+                message: 'Google account email is not verified',
+            });
+        }
+
+        t = await db.sequelize.transaction();
         let user = await Users.findOne({
             where: { email },
-            include: 'credentials'
+            include: 'credentials',
+            transaction: t,
         });
 
         if (!user) {
-            const t = await db.sequelize.transaction();
-
             const newCredentials = await Credentials.create(
                 {
                     email: email,
@@ -403,13 +446,16 @@ exports.authFirebase = async (req, res) => {
                 {
                     credentials_id: newCredentials.credentials_id,
                     email,
-                    name,
+                    name: name || email.split('@')[0],
                     profile_photo_url: picture
                 },
                 { transaction: t }
             );
 
-            await t.commit();
+            user = await Users.findByPk(user.user_id, {
+                include: 'credentials',
+                transaction: t,
+            });
         }
 
         const token = jwt.sign(
@@ -421,25 +467,26 @@ exports.authFirebase = async (req, res) => {
             {
                 user_id: user.user_id,
                 session_token: token
-            }
+            },
+            { transaction: t }
         );
 
-        const safeUser = {
-            user_id: user.user_id,
-            email: user.email,
-            name: user.name,
-            birthday: user.birthday,
-            profile_photo_url: user.profile_photo_url,
-            role: user.credentials.role
-        };
+        const firebaseCustomToken = await createFirebaseSessionToken(
+            user,
+            t,
+            decodedToken.uid
+        );
+        await t.commit();
 
         res.status(200).json({
             error: false,
             message: 'User logged in successfully',
-            user: safeUser,
-            token: token
+            user: safeUser(user),
+            token,
+            firebase_custom_token: firebaseCustomToken,
         });
     } catch (error) {
+        if (t && !t.finished) await t.rollback();
         res.status(400).json({
             error: true,
             message: error.message
@@ -447,8 +494,34 @@ exports.authFirebase = async (req, res) => {
     }
 };
 
+exports.createFirebaseToken = async (req, res) => {
+    let t;
+
+    try {
+        t = await db.sequelize.transaction();
+        const user = await Users.findByPk(req.user_id, {
+            include: 'credentials',
+            transaction: t,
+        });
+        if (!user) {
+            await t.rollback();
+            return res.status(404).json({ error: true, message: 'User not found' });
+        }
+
+        const firebaseCustomToken = await createFirebaseSessionToken(user, t);
+        await t.commit();
+        return res.status(200).json({
+            error: false,
+            firebase_custom_token: firebaseCustomToken,
+        });
+    } catch (error) {
+        if (t && !t.finished) await t.rollback();
+        return res.status(500).json({ error: true, message: error.message });
+    }
+};
+
 const generateOTP = () => {
-    return Math.floor(100000 + Math.random() * 900000).toString();
+    return crypto.randomInt(100000, 1000000).toString();
 };
 
 const sendOTPEmail = async (email, otp) => {
