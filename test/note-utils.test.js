@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const {
     hasUsableNoteContent,
     normalizeNoteInput,
+    serializeNoteWithAnalysis,
 } = require("../utils/note");
 
 test("normalizeNoteInput trims journal fields", () => {
@@ -32,4 +33,23 @@ test("hasUsableNoteContent rejects empty legacy drafts", () => {
     assert.equal(hasUsableNoteContent({ content: null }), false);
     assert.equal(hasUsableNoteContent({ content: "   " }), false);
     assert.equal(hasUsableNoteContent({ content: "A real entry" }), true);
+});
+
+test("serializeNoteWithAnalysis includes the diagnosis in save responses", () => {
+    const note = {
+        toJSON: () => ({ note_id: 12, content: "A real entry" }),
+    };
+
+    assert.deepEqual(
+        serializeNoteWithAnalysis(note, {
+            predicted_status: "Normal",
+            confidence_score: 0.91,
+        }),
+        {
+            note_id: 12,
+            content: "A real entry",
+            predicted_status: "Normal",
+            confidence_score: 0.91,
+        }
+    );
 });

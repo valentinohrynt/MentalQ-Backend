@@ -10,7 +10,19 @@ const normalizeNoteInput = ({ title, content, emotion } = {}) => ({
 const hasUsableNoteContent = (note) =>
     normalizeOptionalText(note?.content).length > 0;
 
+const serializeNoteWithAnalysis = (note, analysis) => {
+    const noteData = typeof note?.toJSON === "function" ? note.toJSON() : { ...note };
+    delete noteData.analysis;
+
+    return {
+        ...noteData,
+        predicted_status: analysis?.predicted_status ?? null,
+        confidence_score: analysis?.confidence_score ?? null,
+    };
+};
+
 module.exports = {
     hasUsableNoteContent,
     normalizeNoteInput,
+    serializeNoteWithAnalysis,
 };

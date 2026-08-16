@@ -3,7 +3,11 @@ const { Notes, Users, Analysis } = db;
 require('dotenv').config();
 const { analyzeWellbeing } = require('../services/gemini');
 const { isAtLeastAge } = require('../utils/age');
-const { hasUsableNoteContent, normalizeNoteInput } = require('../utils/note');
+const {
+    hasUsableNoteContent,
+    normalizeNoteInput,
+    serializeNoteWithAnalysis,
+} = require('../utils/note');
 
 exports.createNote = async (req, res) => {
     const noteInput = normalizeNoteInput(req.body);
@@ -76,12 +80,12 @@ exports.createNote = async (req, res) => {
             );
 
             await t.commit();
-            await analyzeNote(recoveredNote, user_id);
+            const analysis = await analyzeNote(recoveredNote, user_id);
 
             return res.status(201).json({
                 error: false,
                 message: "Note created successfully",
-                note: recoveredNote,
+                note: serializeNoteWithAnalysis(recoveredNote, analysis),
             });
         }
 
@@ -95,12 +99,12 @@ exports.createNote = async (req, res) => {
 
         await t.commit();
 
-        await analyzeNote(newNote, user_id);
+        const analysis = await analyzeNote(newNote, user_id);
 
         res.status(201).json({
             error: false,
             message: "Note created successfully",
-            note: newNote,
+            note: serializeNoteWithAnalysis(newNote, analysis),
         });
     } catch (error) {
         if (t) await t.rollback();
@@ -268,14 +272,14 @@ exports.updateNote = async (req, res) => {
 
         await t.commit();
 
-        if (contentChanged) {
-            await analyzeNote(updatedNote, user_id);
-        }
+        const analysis = contentChanged
+            ? await analyzeNote(updatedNote, user_id)
+            : await Analysis.findOne({ where: { note_id: updatedNote.note_id } });
 
         res.status(200).json({
             error: false,
             message: 'Note updated successfully',
-            note: updatedNote
+            note: serializeNoteWithAnalysis(updatedNote, analysis)
         });
     } catch (error) {
         if (t) await t.rollback();
