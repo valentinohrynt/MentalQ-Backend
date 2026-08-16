@@ -3,11 +3,19 @@ const { Notes, Users, Analysis } = db;
 require('dotenv').config();
 const { analyzeWellbeing } = require('../services/gemini');
 const { isAtLeastAge } = require('../utils/age');
+const { hasUsableNoteContent, normalizeNoteInput } = require('../utils/note');
 
 exports.createNote = async (req, res) => {
-    const { title, content, emotion } = req.body;
+    const noteInput = normalizeNoteInput(req.body);
     const user_id = req.user_id;
     let t;
+
+    if (!hasUsableNoteContent(noteInput)) {
+        return res.status(422).json({
+            error: true,
+            message: "Note content is required",
+        });
+    }
 
     try {
         t = await db.sequelize.transaction();
@@ -51,19 +59,36 @@ exports.createNote = async (req, res) => {
         });
 
         if (existingNote) {
-            await t.rollback();
-            return res.status(400).json({
-                error: true,
-                message: "You have already created a note today",
+            if (hasUsableNoteContent(existingNote)) {
+                await t.rollback();
+                return res.status(409).json({
+                    error: true,
+                    message: "You have already created a note today",
+                });
+            }
+
+            // Older Android versions created an empty server record before the
+            // editor opened. Reuse that orphaned draft instead of blocking the
+            // user for the rest of the day.
+            const recoveredNote = await existingNote.update(
+                noteInput,
+                { transaction: t }
+            );
+
+            await t.commit();
+            await analyzeNote(recoveredNote, user_id);
+
+            return res.status(201).json({
+                error: false,
+                message: "Note created successfully",
+                note: recoveredNote,
             });
         }
 
         const newNote = await Notes.create(
             {
                 user_id,
-                title,
-                content,
-                emotion,
+                ...noteInput,
             },
             { transaction: t }
         );
@@ -117,18 +142,20 @@ exports.getAllNotes = async (req, res) => {
             transaction: t,
         });
 
-        const notesWithAnalysis = notes.map((note) => {
-            const analysis = note.analysis || {};
+        const notesWithAnalysis = notes
+            .filter(hasUsableNoteContent)
+            .map((note) => {
+                const analysis = note.analysis || {};
 
-            const noteData = note.toJSON();
-            delete noteData.analysis;
+                const noteData = note.toJSON();
+                delete noteData.analysis;
 
-            return {
-                ...noteData,
-                predicted_status: analysis.predicted_status,
-                confidence_score: analysis.confidence_score,
-            };
-        });
+                return {
+                    ...noteData,
+                    predicted_status: analysis.predicted_status,
+                    confidence_score: analysis.confidence_score,
+                };
+            });
 
         await t.commit();
 
@@ -212,14 +239,26 @@ exports.updateNote = async (req, res) => {
             });
         }
 
+        const nextNote = normalizeNoteInput({
+            title: title ?? note.title,
+            content: content ?? note.content,
+            emotion: emotion ?? note.emotion,
+        });
+
+        if (!hasUsableNoteContent(nextNote)) {
+            await t.rollback();
+            return res.status(422).json({
+                error: true,
+                message: "Note content is required",
+            });
+        }
+
         const initialContent = note.content;
-        const contentChanged = typeof content === "string" && content !== initialContent;
+        const contentChanged = nextNote.content !== initialContent;
 
         const updatedNote = await note.update(
             {
-                title: title ?? note.title,
-                content: content ?? note.content,
-                emotion: emotion ?? note.emotion,
+                ...nextNote,
                 // Normalization is no longer trusted from mobile clients. Clear a stale
                 // normalized value so prediction falls back to the newly saved content.
                 content_normalized: contentChanged ? null : note.content_normalized,

@@ -25,6 +25,7 @@
   },
   "scripts": {
     "start": "node server.js",
+    "test": "node --test",
     "migrate": "npx sequelize-cli db:migrate",
     "rollback": "npx sequelize-cli db:migrate:undo:all"
   },
